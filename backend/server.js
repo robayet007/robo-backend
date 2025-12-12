@@ -4,17 +4,45 @@ import cors from 'cors';
 
 const app = express();
 
-// Middleware
+// CORS configuration for Vercel
+const allowedOrigins = [
+  'http://localhost:5173', 
+  'https://robotopup.vercel.app', 
+  'http://localhost:3000',
+  'http://localhost:8081', // React Native dev server
+  'http://10.0.2.2:8081', // Android emulator
+  'https://robotopup-backend.vercel.app', // Your backend Vercel URL (add after deployment)
+  'https://*.vercel.app' // All Vercel subdomains
+];
+
 app.use(cors({
-  origin: [
-    'http://localhost:5173', 
-    'https://robotopup.vercel.app', 
-    'http://localhost:3000',
-    'http://localhost:8081', // React Native dev server
-    'http://10.0.2.2:8081' // Android emulator
-  ],
-  credentials: true
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.some(allowed => {
+      if (allowed.includes('*')) {
+        const domain = allowed.replace('*.', '');
+        return origin.endsWith(domain);
+      }
+      return allowed === origin;
+    })) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked origin:', origin);
+      // Development e sob allow, production e strict
+      if (process.env.NODE_ENV === 'development') {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    }
+  },
+  credentials: true,
+  optionsSuccessStatus: 200
 }));
+
 app.use(express.json({
   strict: false,
   verify: (req, res, buf, encoding) => {
@@ -33,24 +61,59 @@ app.use(express.urlencoded({ extended: true }));
 import paymentRoutes from './routes/paymentRoutes.js';
 import productRoutes from './routes/productRoutes.js';
 import telegramWebhook from './routes/telegramWebhook.js';
-import smsRoutes from './routes/smsRoutes.js'; // ✅ নতুন SMS routes
+import smsRoutes from './routes/smsRoutes.js';
 
-// Database connection
+// Database connection with Vercel optimization
 import connectDB from './utils/database.js';
-connectDB();
+
+// Optimized DB connection for Vercel Serverless
+let isDbConnected = false;
+let dbConnectionPromise = null;
+
+const initializeDatabase = async () => {
+  if (!dbConnectionPromise) {
+    dbConnectionPromise = connectDB()
+      .then(() => {
+        isDbConnected = true;
+        console.log('✅ Database connected successfully');
+        return true;
+      })
+      .catch(error => {
+        console.error('❌ Database connection failed:', error.message);
+        isDbConnected = false;
+        // Don't exit process in Vercel
+        return false;
+      });
+  }
+  return dbConnectionPromise;
+};
+
+// Initialize DB connection
+initializeDatabase();
 
 // Routes
 app.use('/api/payments', paymentRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/telegram', telegramWebhook);
-app.use('/api/sms', smsRoutes); // ✅ SMS routes যোগ করুন
+app.use('/api/sms', smsRoutes);
 
-// Health check - updated with SMS info
-app.get('/api/health', (req, res) => {
+// Health check - updated for Vercel
+app.get('/api/health', async (req, res) => {
+  const dbStatus = isDbConnected ? 'connected' : 'disconnected';
+  
   res.status(200).json({ 
     status: 'OK', 
-    message: 'Robo TopUp API is running',
+    message: 'Robo TopUp API is running on Vercel',
     timestamp: new Date().toISOString(),
+    deployment: {
+      platform: 'Vercel',
+      environment: process.env.NODE_ENV || 'development',
+      region: process.env.VERCEL_REGION || 'unknown'
+    },
+    database: {
+      status: dbStatus,
+      connected: isDbConnected
+    },
     endpoints: {
       payments: '/api/payments',
       products: '/api/products',
@@ -59,26 +122,36 @@ app.get('/api/health', (req, res) => {
         receive: '/api/sms/receive',
         list: '/api/sms',
         stats: '/api/sms/stats/overview'
-      }
-    },
-    environment: process.env.NODE_ENV || 'development'
+      },
+      health: '/api/health',
+      dashboard: '/sms-dashboard'
+    }
   });
 });
 
 // Telegram webhook test endpoint
 app.get('/api/telegram/test', (req, res) => {
+  const host = req.get('host');
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  
   res.status(200).json({
     success: true,
     message: 'Telegram webhook is working',
-    webhookUrl: `${req.protocol}://${req.get('host')}/api/telegram/webhook`
+    webhookUrl: `${protocol}://${host}/api/telegram/webhook`,
+    note: 'Use this URL for Telegram bot webhook setup'
   });
 });
 
-// SMS test endpoint (for quick testing)
+// SMS test endpoint
 app.get('/api/sms/test', (req, res) => {
+  const host = req.get('host');
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const baseUrl = `${protocol}://${host}`;
+  
   res.status(200).json({
     success: true,
     message: 'SMS API is working',
+    baseUrl: baseUrl,
     endpoints: {
       receiveSMS: 'POST /api/sms/receive',
       getSMS: 'GET /api/sms',
@@ -86,11 +159,15 @@ app.get('/api/sms/test', (req, res) => {
     },
     exampleRequest: {
       method: 'POST',
-      url: '/api/sms/receive',
+      url: `${baseUrl}/api/sms/receive`,
+      headers: {
+        'Content-Type': 'application/json'
+      },
       body: {
         sender: '+8801712345678',
         message: 'Your OTP is 123456',
-        deviceId: 'android-phone-1'
+        deviceId: 'android-phone-1',
+        timestamp: new Date().toISOString()
       }
     }
   });
@@ -98,6 +175,10 @@ app.get('/api/sms/test', (req, res) => {
 
 // SMS Dashboard (for monitoring)
 app.get('/sms-dashboard', (req, res) => {
+  const host = req.get('host');
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const baseUrl = `${protocol}://${host}`;
+  
   res.send(`
     <!DOCTYPE html>
     <html lang="en">
@@ -143,6 +224,16 @@ app.get('/sms-dashboard', (req, res) => {
             .header p {
                 font-size: 1.1rem;
                 opacity: 0.9;
+            }
+            
+            .status-badge {
+                display: inline-block;
+                background: #4CAF50;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 20px;
+                font-size: 0.9rem;
+                margin-top: 10px;
             }
             
             .main-content {
@@ -296,11 +387,13 @@ app.get('/sms-dashboard', (req, res) => {
             <div class="header">
                 <h1>📱 SMS Forwarder Dashboard</h1>
                 <p>Robo TopUp SMS Management System</p>
+                <div class="status-badge">🟢 Running on Vercel</div>
             </div>
             
             <div class="main-content">
                 <div class="api-section">
                     <h2>API Endpoints</h2>
+                    <p><strong>Base URL:</strong> <code>${baseUrl}</code></p>
                     
                     <div class="endpoint">
                         <div>
@@ -335,7 +428,7 @@ app.get('/sms-dashboard', (req, res) => {
                     <div class="code-block">
 // React Native Example:
 const forwardSMS = async () => {
-  const response = await fetch('${req.protocol}://${req.get('host')}/api/sms/receive', {
+  const response = await fetch('${baseUrl}/api/sms/receive', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -380,7 +473,7 @@ const forwardSMS = async () => {
             </div>
             
             <div class="footer">
-                Robo TopUp SMS Forwarder • ${new Date().getFullYear()}
+                Robo TopUp SMS Forwarder • Deployed on Vercel • ${new Date().getFullYear()}
             </div>
         </div>
         
@@ -416,6 +509,17 @@ const forwardSMS = async () => {
                     responseDiv.innerHTML = 'Error: ' + error.message;
                 }
             });
+            
+            // Auto-load health status
+            window.addEventListener('load', async () => {
+                try {
+                    const response = await fetch('/api/health');
+                    const data = await response.json();
+                    console.log('Health status:', data);
+                } catch (error) {
+                    console.log('Health check failed:', error);
+                }
+            });
         </script>
     </body>
     </html>
@@ -429,7 +533,8 @@ app.use((err, req, res, next) => {
     success: false, 
     message: 'Something went wrong!',
     error: process.env.NODE_ENV === 'development' ? err.message : undefined,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    deployment: 'Vercel'
   });
 });
 
@@ -439,6 +544,7 @@ app.use((req, res, next) => {
     success: false, 
     message: 'API endpoint not found',
     path: req.originalUrl,
+    baseUrl: `${req.headers['x-forwarded-proto'] || req.protocol}://${req.get('host')}`,
     availableEndpoints: {
       health: '/api/health',
       sms: '/api/sms/receive',
@@ -451,14 +557,20 @@ app.use((req, res, next) => {
   });
 });
 
+// Vercel-specific: Export the app for serverless functions
+// This is the main change for Vercel deployment
+
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(`
+// Only start listening if not on Vercel (for local development)
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`
     ┌─────────────────────────────────────────────────────────────┐
     │                                                             │
     │  🚀 Robo TopUp Server v2.0                                  │
     │  📡 SMS Forwarder Feature Added                             │
+    │  🚀 Vercel Ready                                            │
     │                                                             │
     ├─────────────────────────────────────────────────────────────┤
     │                                                             │
@@ -476,5 +588,9 @@ app.listen(PORT, () => {
     │  🩺 Health Check: http://localhost:${PORT}/api/health        │
     │                                                             │
     └─────────────────────────────────────────────────────────────┘
-  `);
-});
+    `);
+  });
+}
+
+// Export the Express app for Vercel Serverless Functions
+export default app;

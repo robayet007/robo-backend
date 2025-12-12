@@ -3,7 +3,12 @@ import Sms from '../models/Sms.js';
 
 const router = express.Router();
 
-// Receive SMS from React Native app
+// Helper function to validate MongoDB ObjectId
+const isValidObjectId = (id) => {
+  return /^[0-9a-fA-F]{24}$/.test(id);
+};
+
+// Receive SMS from React Native app or IFTTT
 router.post('/receive', async (req, res) => {
   try {
     const { sender, message, timestamp, deviceId } = req.body;
@@ -37,9 +42,6 @@ router.post('/receive', async (req, res) => {
       id: newSms._id
     });
 
-    // Optional: Add auto-forwarding logic here
-    // Example: forwardToTelegram(newSms);
-
     res.status(201).json({
       success: true,
       message: 'SMS received and stored successfully',
@@ -72,12 +74,13 @@ router.get('/', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
     
-    const { deviceId, sender, startDate, endDate } = req.query;
+    const { deviceId, sender, startDate, endDate, status } = req.query;
     
     // Build filter
     const filter = {};
     if (deviceId) filter.deviceId = deviceId;
     if (sender) filter.sender = { $regex: sender, $options: 'i' };
+    if (status) filter.status = status;
     if (startDate || endDate) {
       filter.createdAt = {};
       if (startDate) filter.createdAt.$gte = new Date(startDate);
@@ -119,9 +122,19 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Get SMS by ID
+// Get SMS by ID (FIXED with ObjectId validation)
 router.get('/:id', async (req, res) => {
   try {
+    // Validate ObjectId
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid SMS ID format. Must be a 24-character hex string.',
+        receivedId: req.params.id,
+        example: '507f1f77bcf86cd799439011'
+      });
+    }
+    
     const sms = await Sms.findById(req.params.id);
     
     if (!sms) {
@@ -147,9 +160,17 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Update SMS status
+// Update SMS status (FIXED with ObjectId validation)
 router.patch('/:id/status', async (req, res) => {
   try {
+    // Validate ObjectId
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid SMS ID format'
+      });
+    }
+    
     const { status, forwarded, notes } = req.body;
     
     const updateData = {};
@@ -327,14 +348,22 @@ router.get('/search/text', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to search SMS',
-      error: process.env.NODEENV === 'development' ? error.message : undefined
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
 
-// Delete SMS
+// Delete SMS (FIXED with ObjectId validation)
 router.delete('/:id', async (req, res) => {
   try {
+    // Validate ObjectId
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid SMS ID format'
+      });
+    }
+    
     const deletedSms = await Sms.findByIdAndDelete(req.params.id);
     
     if (!deletedSms) {
@@ -365,7 +394,7 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// Bulk delete (delete all)
+// Bulk delete (delete all) - USE WITH CAUTION
 router.delete('/admin/clear-all', async (req, res) => {
   try {
     // For security, you might want to add authentication here
@@ -386,6 +415,67 @@ router.delete('/admin/clear-all', async (req, res) => {
       success: false,
       message: 'Failed to clear SMS',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Quick health check for SMS API
+router.get('/health/check', async (req, res) => {
+  try {
+    const smsCount = await Sms.countDocuments();
+    const latestSms = await Sms.findOne().sort({ createdAt: -1 });
+    
+    res.status(200).json({
+      success: true,
+      message: 'SMS API is healthy',
+      data: {
+        totalSms: smsCount,
+        latestSms: latestSms ? {
+          id: latestSms._id,
+          sender: latestSms.sender,
+          message: latestSms.message.substring(0, 50) + '...',
+          time: latestSms.createdAt
+        } : null,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'SMS API health check failed',
+      error: error.message
+    });
+  }
+});
+
+// Test endpoint to verify API is working
+router.post('/test/receive', async (req, res) => {
+  try {
+    const testSms = new Sms({
+      sender: '+88017' + Math.floor(Math.random() * 10000000),
+      message: 'This is a test SMS from API',
+      deviceId: 'test-api',
+      status: 'received',
+      forwarded: false
+    });
+
+    await testSms.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Test SMS created successfully',
+      data: {
+        id: testSms._id,
+        sender: testSms.sender,
+        message: testSms.message,
+        createdAt: testSms.createdAt
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create test SMS',
+      error: error.message
     });
   }
 });
